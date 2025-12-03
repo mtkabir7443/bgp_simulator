@@ -19,3 +19,7 @@ g++ -O3 -march=native -pthread -o bgp_simulator main.cpp
 ```bash
 ./bgp_simulator --relationships bench/many/CAIDAASGraphCollector_2025.10.16.txt --announcements bench/many/anns.csv --rov-asns bench/many/rov_asns.csv
 ```
+
+## Performance
+- **Execution Time (Many Dataset):** 1.184s (Real)
+- **System:** WSL2 on Windows
