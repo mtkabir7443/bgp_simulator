@@ -601,7 +601,7 @@ void run_simulation_and_write() {
     std::shuffle(all_nodes.begin(), all_nodes.end(), g);
 
     int num_threads = std::thread::hardware_concurrency();
-    if(num_threads > 4) num_threads = 4;
+    if(num_threads > 2) num_threads = 2;
     if(num_threads == 0) num_threads = 2;
     
     thread_out_arenas.resize(num_threads);
