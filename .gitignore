@@ -17,4 +17,4 @@ bench/many/ribs*.csv
 bench/many/ribs.csv
 bench/prefix/ribs.csv
 bench/subprefix/ribs.csv
-EOF
+EOF*:Zone.Identifier
