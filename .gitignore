@@ -1,0 +1,20 @@
+cat <<EOF > .gitignore
+# Ignore Build Artifacts
+bgp_simulator
+*.o
+*.so
+
+# Ignore OS/Editor files
+.DS_Store
+.vscode/
+
+# Ignore Generated Outputs
+ribs.csv
+
+# Ignore Massive Benchmark Data (>100MB)
+# preventing git push failure
+bench/many/ribs*.csv
+bench/many/ribs.csv
+bench/prefix/ribs.csv
+bench/subprefix/ribs.csv
+EOF

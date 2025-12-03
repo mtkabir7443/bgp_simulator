@@ -1,0 +1,41 @@
+Justin Furuness — 10/26/2025 1:33 AM
+@everyone I’ve finalized the course project, it’s complete and on HuskyCT; barring some huge error it will be set in stone. I’d rather make it too easy than too hard, so I’m removing all speed requirements. Submit a working program with C++ bindings and you will get 100%.
+
+You can use AI (I recommend Claude Code). Fair warning though, it may not be useful if you don’t already know what you’re doing.
+
+To incentivize people to still try and speed up their code (optionally):
+The top 3 fastest programs will get an A in the course and be able to skip the final. 
+The top 10 fastest programs will get +3 on their final grade in the course.
+
+Note that to be eligible for any extra credit, you must submit by December 2nd 11:59PM ET.
+
+Good luck!
+
+Justin Furuness — 11/19/2025 3:11 PM
+@everyone when you have completed the C++ project, your final program should run like this if you are not using Python bindings
+
+./bgp_simulator --relationships ../bench/many/CAIDAASGraphCollector_2025.10.16.txt --announcements ../bench/many/anns.csv --rov-asns ../bench/many/rov_asns.csv
+
+And it should output a ribs.csv file that can be compared against the test
+
+Good luck 🙂
+
+Justin Furuness — 11/25/2025 12:24 PM
+I've modified the course project on huskyct to allow for unlimited attempts. Good luck!
+
+Justin Furuness — 11/26/2025 4:06 PM
+To clarify, by unlimited attempts I don't mean that I will grade your assignment unlimited times. Someone just wanted to submit their code, work on making it faster, and possibly submit again later. So I enabled it. If you'd like you can send me your code early and I can try to double check that it's good but I wasn't planning on grading multiple times. If you pass the test cases, and one more test I will have "hidden" to test a cycle check, you'll be all set
+
+Justin Furuness — Yesterday at 5:26 PM
+One more addition, please specify in the README how long it took on your machine. That way I can know if it's just running for a while, or if it's infinitely looping. I will update the PDF later but overleaf is down for me right now.
+
+Justin Furuness — 11/25/2025 11:54 AM
+First of all, great job! That sounds amazing.
+
+Portable to ubuntu ideally, that's what the grading VM is running. You can have special install commands if you can like that I can run (but not something that would change the kernel or something), just lmk. It won't have automatic grading, I'll manually run it for all of them. But it does have to run.
+
+That being said, I think there are speedups that don't require you to go beyond portable C++ that likely have not yet been found. Specifically in regards to writing to disk, I've heard that the C++ buffer flushing may not be as good as C. Someting to consider! But even beyond that, there are high level optimizations that can be made. Good luck!
+
+Justin Furuness — 1:30 PM
+@everyone A few people have submitted, and their projects have undefined behavior that make the tests pass sometimes and not at other times. Make sure to have your code running in wsl, not some VS code WSL terminal, since that breaks the tests. Additionally, you can add -O3 -g0 flags to your compilation command to remove debug info and make it a release build. Sometimes undefined behavior will overwrite places that debug info lives and won't affect your program, but these flags will strip that to make it more likely to crash or fail the tests if you have undefined behavior.
+
