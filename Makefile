@@ -1,4 +1,4 @@
-# CSE3150 BGP Simulator Makefile
+# High-Performance BGP Simulator Makefile
 # Author: Mohammed Kabir
 
 CXX = g++
