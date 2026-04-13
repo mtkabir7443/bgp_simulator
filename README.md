@@ -70,10 +70,3 @@ AS1|AS2|relationship|source
 Where `relationship` is:
 - `-1`: AS1 is provider to AS2 (customer-provider)
 - `0`: AS1 and AS2 are peers
-
-### Announcements CSV
-```csv
-prefix,origin_asn,rov_invalid
-10.0.0.0/8,12345,false
-```
-```
