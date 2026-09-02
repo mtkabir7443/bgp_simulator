@@ -2,6 +2,7 @@
 bgp_simulator
 bgp_sim
 bgp_sim_gpu
+test_memory
 *.o
 *.so
 
@@ -13,6 +14,8 @@ __pycache__/
 
 # Profiling
 callgrind.out.*
+*.nsys-rep
+*.ncu-rep
 
 # OS / editor
 .DS_Store
@@ -22,11 +25,13 @@ callgrind.out.*
 # Generated outputs
 ribs.csv
 
-# Massive benchmark data (>100MB) — prevents push failure
-bench/
-
 # Generated datasets
 rel.txt
 ann.txt
-ann_py_test.txt
+rel_test.txt
+ann_test.txt
 rel_py_test.txt
+ann_py_test.txt
+
+# Massive benchmark data (>100MB) - prevents push failure
+bench/
