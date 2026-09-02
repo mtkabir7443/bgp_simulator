@@ -1,94 +1,186 @@
-# BGP Simulator (Singularity Edition)
+# High-Performance BGP Simulator (Singularity Edition)
 
-A high-performance, heterogeneous CPU/GPU BGP (Border Gateway Protocol) routing simulator written in C++ and CUDA. Designed to test and simulate global-scale internet routing topographies, route propagation, and loop detection under extreme memory constraints.
+A heterogeneous CPU/GPU implementation of a Border Gateway Protocol (BGP) simulator for modeling
+Internet routing behavior at global scale. Built in C++17 and CUDA, with a PyBind11 extension for
+driving the C++ engine directly from Python.
 
-## 🚀 Performance Highlights
-
-- **GPU Acceleration:** Offloads parallel graph traversal and route evaluation to Nvidia streaming multiprocessors using custom CUDA kernels.
-- **Struct-of-Arrays (SoA) Memory Layout:** Replaces standard object arrays with continuous, cache-aligned arrays to maximize memory throughput and eliminate cache thrashing.
-- **Kernel-Level Huge Pages (`MAP_HUGETLB`):** Bypasses standard virtual memory translation overhead, completely eliminating Translation Lookaside Buffer (TLB) misses during massive graph traversals.
-- **Zero-Copy Memory Mapping:** Utilizes `mmap` with shared mapping policies to handle massive routing tables without CPU bottlenecks.
-- **Fault Tolerant & Stress Tested:** Engineered with rigorous bounds checking, OOM error handling, and automated PyTest end-to-end verification.
+The CPU engine placed 1st in competitive benchmarking, processing 78k+ ASes in under 0.8 seconds on
+just 2 CPU cores. The CUDA engine completes a full-parity run over a large synthetic topology in
+~238 ms.
 
 ---
 
-## 🛠️ System Architecture
+## Architecture
 
-```
-                 [ NVMe SSD / Dataset ]
-                            │
-                            ▼   (Zero-Copy mmap)
-                    [ CPU RAM / Host ]
-                            │
-              ┌─────────────┴──────────────┐
-              ▼                            ▼
-   [ CSR Graph Topology ]        [ Huge Page SoA RIB ]
-              │                            │
-              └─────────────┬──────────────┘
-                            ▼   (PCIe Bus Async Transfers)
-                    [ Nvidia GPU VRAM ]
-                            │
-                            ▼
-          [ CUDA Parallel Graph Traversal Kernel ]
-```
+The simulator is built around a data-oriented design rather than an object graph, which keeps route
+state contiguous and cache-resident under load.
+
+- **Struct-of-Arrays route state** — AS relationships and announcements are stored as parallel
+  arrays, not as per-AS objects, eliminating pointer chasing during propagation.
+- **Huge-page backed arena** — a custom aligned allocator requests 2 MB huge pages and falls back
+  gracefully to standard aligned allocation when they are unavailable.
+- **CUDA full-parity engine** — `main.cu` implements the same propagation and loop-detection
+  semantics as the CPU path, using pinned host memory and multiple streams to overlap graph
+  transfer with kernel execution.
+- **PyBind11 bindings** — `main.cpp` compiles a second time as a Python extension module, exposing
+  the engine as `bgp_simulator.run()` with no subprocess overhead.
 
 ---
 
-## ⚙️ Requirements & Dependencies
+## Requirements
 
-- **OS:** Linux / Windows Subsystem for Linux (WSL2 Ubuntu)
-- **Compiler:** NVCC (Nvidia CUDA Compiler) & G++ (Supporting C++17 or higher)
-- **Testing:** Google Test (`libgtest-dev`) & Python 3 with PyTest
+| Component | Requirement |
+|---|---|
+| Compiler | g++ with C++17 support |
+| CUDA | NVIDIA CUDA Toolkit, compute capability 8.6 or newer |
+| Python | 3.8+ with `pybind11` installed |
+| Testing | GoogleTest (`libgtest-dev`), `pytest` |
 
----
-
-## 🚀 Quick Start & Compilation
-
-1. **Clone the Repository & Configure Huge Pages:**
-
-   ```bash
-   sudo sysctl -w vm.nr_hugepages=1024
-   ```
-
-2. **Generate Synthetic Datasets:**
-
-   ```bash
-   python3 generate_data.py
-   python3 generate_edge_cases.py
-   ```
-
-3. **Compile the CUDA Binary:**
-
-   ```bash
-   nvcc -O3 main.cu -o bgp_sim_gpu
-   ```
-
-4. **Run the Simulation:**
-
-   ```bash
-   ./bgp_sim_gpu
-   ```
-
----
-
-## 🧪 Testing & Verification
-
-The project includes a multi-layered testing framework covering micro-level memory safety, domain logic, and hardware stress limits:
-
-**C++ Memory & Unit Tests (GTest):**
+Install the Python-side build dependency:
 
 ```bash
-g++ test_memory.cpp -lgtest -lgtest_main -pthread -o test_memory && ./test_memory
+pip install pybind11
 ```
 
-**End-to-End Pipeline Automation (PyTest):**
+If your GPU is not Ampere-class, adjust `NVCCFLAGS` in the `Makefile`:
+
+```make
+NVCCFLAGS = -O3 -std=c++17 -arch=sm_89   # Ada (RTX 40-series)
+```
+
+---
+
+## Huge Pages
+
+The allocator is designed around 2 MB huge pages. Without them it still runs correctly, but falls
+back to standard pages and loses a meaningful amount of throughput on large topologies. Reserve
+them before a benchmark run:
 
 ```bash
-pytest test_pipeline.py -v
+sudo sysctl -w vm.nr_hugepages=1024
 ```
 
-**Hardware Stress Test (VRAM Saturation & OOM Validation):**
+That reserves 2 GB. To make it persist across reboots, add `vm.nr_hugepages = 1024` to
+`/etc/sysctl.conf`.
+
+---
+
+## Building
 
 ```bash
-python3 stress_test.py
+make            # builds CPU binary, GPU binary, and Python extension
+make bgp_simulator   # CPU only
+make bgp_sim_gpu     # GPU only
+make clean
 ```
+
+Targets produced:
+
+| Target | Output |
+|---|---|
+| `bgp_simulator` | CPU engine |
+| `bgp_sim_gpu` | CUDA engine |
+| `bgp_simulator*.so` | PyBind11 extension module |
+| `test_memory` | GoogleTest allocator suite |
+
+---
+
+## Usage
+
+### Command line
+
+```bash
+./bgp_simulator --relationships rel.txt --announcements ann.txt
+./bgp_sim_gpu   --relationships rel.txt --announcements ann.txt
+```
+
+Results are written to `ribs.csv`.
+
+### From Python
+
+```python
+import bgp_simulator
+
+bgp_simulator.run(
+    relationships="rel.txt",
+    announcements="ann.txt",
+    rov_asns="",
+)
+```
+
+### Input format
+
+`rel.txt` — one AS relationship per line, pipe-delimited, where `0` denotes a peer-to-peer link and
+`-1` denotes provider-to-customer:
+
+```
+1|2|0
+2|3|-1
+```
+
+`ann.txt` — one announcement per line as `origin_asn,prefix,timestamp`:
+
+```
+1,192.168.1.0/24,0
+```
+
+---
+
+## Generating Test Data
+
+```bash
+python3 generate_data.py         # large synthetic topology tuned for ~14 GB route state
+python3 generate_edge_cases.py   # infinite-loop and disconnected-island topologies
+```
+
+`generate_edge_cases.py` produces `ann_island.txt` / `rel_island.txt` and the loop topology used to
+verify that path-vector loop detection terminates correctly on adversarial input.
+
+---
+
+## Testing
+
+```bash
+make test                    # GoogleTest allocator suite
+pytest test_pipeline.py -v   # end-to-end CPU and GPU pipeline
+python3 test_python_binding.py
+python3 stress_test.py       # 500k-route soak test
+```
+
+The allocator suite covers huge-page fallback and free, aligned allocation at standard sizes, and
+dynamic growth of the struct-of-arrays backing store.
+
+---
+
+## Benchmarking & Analysis
+
+| Script | Purpose |
+|---|---|
+| `benchmark.py` | General throughput harness |
+| `caida_benchmark.py` | Benchmarks against real CAIDA AS-relationship datasets |
+| `lpm_churn_sim.py` | Longest-prefix-match behavior under route churn |
+| `simulate_internet_rov.py` | Route Origin Validation deployment simulation |
+| `visualize_hijack.py` | Renders prefix-hijack propagation graphs |
+
+![Hijack propagation](hijack_attack_graph.png)
+
+---
+
+## Repository Layout
+
+```
+main.cpp                  CPU engine + PyBind11 module
+main.cu                   CUDA engine
+test_memory.cpp           GoogleTest allocator suite
+Makefile                  CPU / GPU / Python build targets
+compare_output.sh         Diffs CPU and GPU output for parity checking
+```
+
+---
+
+## Notes on Benchmark Figures
+
+The 78k-AS / 0.8-second figure is measured on CAIDA topology data on 2 CPU cores. The ~238 ms CUDA
+figure is measured on the synthetic topology from `generate_data.py`. These are different workloads
+and should not be read as a direct speedup ratio; use `compare_output.sh` to verify parity before
+comparing timings on a common dataset.
