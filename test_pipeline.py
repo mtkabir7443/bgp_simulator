@@ -49,7 +49,7 @@ def test_gpu_simulation_execution(tmp_path):
     )
 
     assert result.returncode == 0, f"GPU engine exited {result.returncode}: {result.stderr}"
-    assert "GPU Full-Parity Engine" in result.stdout
+    assert "GPU Engine (kernel-only)" in result.stdout
 
 
 def test_cpu_gpu_output_parity(tmp_path):

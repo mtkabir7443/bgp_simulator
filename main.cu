@@ -162,7 +162,7 @@ int main(int argc, char* argv[]) {
 
     float ms = 0;
     CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-    std::cout << "🚀 GPU Full-Parity Engine completed in: " << ms << " ms\n";
+    std::cout << "🚀 GPU Engine (kernel-only) completed in: " << ms << " ms\n";
 
     cudaFree(d_row_offsets); cudaFree(d_col_edges); cudaFree(d_rov);
     cudaFree(d_curr_rib); cudaFree(d_next_rib);

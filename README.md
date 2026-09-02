@@ -5,8 +5,11 @@ Internet routing behavior at global scale. Built in C++17 and CUDA, with a PyBin
 driving the C++ engine directly from Python.
 
 The CPU engine placed 1st in competitive benchmarking, processing 78k+ ASes in under 0.8 seconds on
-just 2 CPU cores. The CUDA engine completes a full-parity run over a large synthetic topology in
-~238 ms.
+just 2 CPU cores.
+
+> **Status:** the CUDA engine is in development. It builds and runs, but does not yet parse input
+> files or serialize a RIB, so it is not benchmarked against the CPU path. See
+> [CUDA engine status](#cuda-engine-status) below.
 
 ---
 
@@ -19,9 +22,8 @@ state contiguous and cache-resident under load.
   arrays, not as per-AS objects, eliminating pointer chasing during propagation.
 - **Huge-page backed arena** — a custom aligned allocator requests 2 MB huge pages and falls back
   gracefully to standard aligned allocation when they are unavailable.
-- **CUDA full-parity engine** — `main.cu` implements the same propagation and loop-detection
-  semantics as the CPU path, using pinned host memory and multiple streams to overlap graph
-  transfer with kernel execution.
+- **CUDA engine (in development)** — `main.cu` implements GPU-side graph propagation. Host-side
+  file parsing and RIB writeback are not yet wired up.
 - **PyBind11 bindings** — `main.cpp` compiles a second time as a Python extension module, exposing
   the engine as `bgp_simulator.run()` with no subprocess overhead.
 
@@ -91,10 +93,18 @@ Targets produced:
 
 ```bash
 ./bgp_simulator --relationships rel.txt --announcements ann.txt
-./bgp_sim_gpu   --relationships rel.txt --announcements ann.txt
 ```
 
-Results are written to `ribs.csv`.
+Results are written to `ribs.csv` as `asn,prefix,as_path`:
+
+```
+asn,prefix,as_path
+1,192.168.1.0/24,"(1,)"
+2,192.168.1.0/24,"(2, 1)"
+3,192.168.1.0/24,"(3, 2, 1)"
+```
+
+The GPU binary accepts the same flags but currently ignores them — see below.
 
 ### From Python
 
@@ -178,9 +188,23 @@ compare_output.sh         Diffs CPU and GPU output for parity checking
 
 ---
 
+## CUDA Engine Status
+
+`main.cu` builds and executes GPU kernels, but the host side is incomplete:
+
+- Command-line arguments are accepted and discarded; `--relationships` and `--announcements` have
+  no effect on what the kernel processes.
+- No RIB is serialized, so `ribs.csv` is not produced by the GPU path.
+- Reported kernel times therefore do not scale with input size and are not comparable to CPU
+  timings.
+
+Remaining work: parse the relationship and announcement files host-side, upload the topology to
+device memory, and write the resulting RIB back out in the same `asn,prefix,as_path` format the CPU
+engine emits. Once that lands, `test_cpu_gpu_output_parity` in `test_pipeline.py` will verify the
+two engines agree, and `compare_output.sh` can diff their output on a shared dataset.
+
 ## Notes on Benchmark Figures
 
-The 78k-AS / 0.8-second figure is measured on CAIDA topology data on 2 CPU cores. The ~238 ms CUDA
-figure is measured on the synthetic topology from `generate_data.py`. These are different workloads
-and should not be read as a direct speedup ratio; use `compare_output.sh` to verify parity before
-comparing timings on a common dataset.
+The 78k-AS / 0.8-second figure is measured on CAIDA topology data on 2 CPU cores with huge pages
+reserved. Timings vary meaningfully with huge-page availability, so reserve them before comparing
+runs.
