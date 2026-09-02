@@ -24,3 +24,9 @@ ribs.csv
 
 # Massive benchmark data (>100MB) — prevents push failure
 bench/
+
+# Generated datasets
+rel.txt
+ann.txt
+ann_py_test.txt
+rel_py_test.txt
