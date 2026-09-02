@@ -1,72 +1,94 @@
-# High-Performance BGP Simulator (Ludicrous Edition)
+# BGP Simulator (Singularity Edition)
 
-A hyper-optimized, single-file C++ implementation of a Border Gateway Protocol (BGP) simulator for modeling Internet routing behavior. Designed for absolute maximum throughput and memory efficiency, this simulator placed 1st in competitive benchmarking, processing 78k+ ASes in under 0.8 seconds on just 2 CPU cores.
+A high-performance, heterogeneous CPU/GPU BGP (Border Gateway Protocol) routing simulator written in C++ and CUDA. Designed to test and simulate global-scale internet routing topographies, route propagation, and loop detection under extreme memory constraints.
 
-## Features & Optimizations
+## 🚀 Performance Highlights
 
-Unlike standard object-oriented approaches, this simulator utilizes a data-oriented design pattern to eliminate overhead:
-- **Custom Memory Arena:** Utilizes a custom `malloc`-based arena to completely avoid `mmap` thrashing during high-volume I/O operations.
-- **SIMD Acceleration:** Implements AVX2 intrinsics (`_mm256_loadu_si256`, `_mm256_cmpeq_epi32`) for rapid AS path loop detection.
-- **Aggressive Pre-allocation:** Massive reservation of vectors (node degree * 64) to eliminate system time spent on dynamic memory reallocations.
-- **Zero-Overhead I/O:** `ftruncate` pre-allocation for output files to prevent metadata update overhead during massive multi-threaded writes.
-- **Lock-Free Concepts:** Utilizes aligned spinlocks (`AlignedSpinLock`) with hardware pause instructions to minimize thread contention.
+- **GPU Acceleration:** Offloads parallel graph traversal and route evaluation to Nvidia streaming multiprocessors using custom CUDA kernels.
+- **Struct-of-Arrays (SoA) Memory Layout:** Replaces standard object arrays with continuous, cache-aligned arrays to maximize memory throughput and eliminate cache thrashing.
+- **Kernel-Level Huge Pages (`MAP_HUGETLB`):** Bypasses standard virtual memory translation overhead, completely eliminating Translation Lookaside Buffer (TLB) misses during massive graph traversals.
+- **Zero-Copy Memory Mapping:** Utilizes `mmap` with shared mapping policies to handle massive routing tables without CPU bottlenecks.
+- **Fault Tolerant & Stress Tested:** Engineered with rigorous bounds checking, OOM error handling, and automated PyTest end-to-end verification.
 
-## Quick Start
+---
 
-### Prerequisites
-- C++ compiler with AVX2 support (GCC/Clang)
-- Linux/WSL environment
-- Pthreads library
+## 🛠️ System Architecture
 
-### Building
-To compile with full optimizations (AVX2 instructions required):
+```
+                 [ NVMe SSD / Dataset ]
+                            │
+                            ▼   (Zero-Copy mmap)
+                    [ CPU RAM / Host ]
+                            │
+              ┌─────────────┴──────────────┐
+              ▼                            ▼
+   [ CSR Graph Topology ]        [ Huge Page SoA RIB ]
+              │                            │
+              └─────────────┬──────────────┘
+                            ▼   (PCIe Bus Async Transfers)
+                    [ Nvidia GPU VRAM ]
+                            │
+                            ▼
+          [ CUDA Parallel Graph Traversal Kernel ]
+```
+
+---
+
+## ⚙️ Requirements & Dependencies
+
+- **OS:** Linux / Windows Subsystem for Linux (WSL2 Ubuntu)
+- **Compiler:** NVCC (Nvidia CUDA Compiler) & G++ (Supporting C++17 or higher)
+- **Testing:** Google Test (`libgtest-dev`) & Python 3 with PyTest
+
+---
+
+## 🚀 Quick Start & Compilation
+
+1. **Clone the Repository & Configure Huge Pages:**
+
+   ```bash
+   sudo sysctl -w vm.nr_hugepages=1024
+   ```
+
+2. **Generate Synthetic Datasets:**
+
+   ```bash
+   python3 generate_data.py
+   python3 generate_edge_cases.py
+   ```
+
+3. **Compile the CUDA Binary:**
+
+   ```bash
+   nvcc -O3 main.cu -o bgp_sim_gpu
+   ```
+
+4. **Run the Simulation:**
+
+   ```bash
+   ./bgp_sim_gpu
+   ```
+
+---
+
+## 🧪 Testing & Verification
+
+The project includes a multi-layered testing framework covering micro-level memory safety, domain logic, and hardware stress limits:
+
+**C++ Memory & Unit Tests (GTest):**
+
 ```bash
-make
-# Alternatively: g++ -O3 -march=native -pthread -Wall -Wextra -o bgp_simulator main.cpp
+g++ test_memory.cpp -lgtest -lgtest_main -pthread -o test_memory && ./test_memory
 ```
 
-### Running
+**End-to-End Pipeline Automation (PyTest):**
+
 ```bash
-./bgp_simulator \
-  --relationships bench/many/CAIDAASGraphCollector_2025.10.16.txt \
-  --announcements bench/many/anns.csv \
-  --rov-asns bench/many/rov_asns.csv
+pytest test_pipeline.py -v
 ```
 
-## Performance Benchmark
+**Hardware Stress Test (VRAM Saturation & OOM Validation):**
 
-**Hardware:** WSL2 on Windows, Restricted to 2 CPU Cores
-**Dataset:** 78,370 ASes, 40 announcements
-
-| Metric | Time |
-|-------|------|
-| Average Execution Time | **0.788s** |
-| Min Execution Time | 0.780s |
-| Max Execution Time | 0.799s |
-
-*Note: This implementation achieved ~2.6x faster execution times compared to standard multi-threaded, object-oriented OpenMP implementations on the same hardware.*
-
-## Architecture 
-
-To achieve sub-second processing times, this simulator foregoes standard `src/` and `include/` modularity in favor of a single compilation unit. This guarantees maximum compiler inlining and cache locality.
-
-### Core Data Structures
-- `FastVector<T>`: A custom, lightweight vector implementation replacing `std::vector` to remove exception-handling overhead and provide forced inlining.
-- `PrivateOutArena`: Thread-local string building arenas that prevent I/O blocking until the final stage.
-- `Announcement`: Packed 64-bit scoring system for ultra-fast route comparison.
-
-### Propagation Model
-1. **Up Phase**: Routes propagate from customers to providers using counting sort for optimal cache hits.
-2. **Across Phase**: Routes propagate between peers.
-3. **Down Phase**: Routes propagate from providers to customers.
-
-## Input File Formats
-
-### AS Relationships (CAIDA Format)
+```bash
+python3 stress_test.py
 ```
-# Comments start with #
-AS1|AS2|relationship|source
-```
-Where `relationship` is:
-- `-1`: AS1 is provider to AS2 (customer-provider)
-- `0`: AS1 and AS2 are peers

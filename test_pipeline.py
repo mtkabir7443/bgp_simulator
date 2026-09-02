@@ -41,4 +41,4 @@ def test_gpu_simulation_execution():
     cmd = [GPU_BINARY, "--relationships", "rel.txt", "--announcements", "ann.txt"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 0
-    assert "GPU KERNEL EXECUTION" in result.stdout
+    assert "GPU Full-Parity Engine" in result.stdout
