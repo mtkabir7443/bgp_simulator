@@ -7,9 +7,9 @@ driving the C++ engine directly from Python.
 The CPU engine placed 1st in competitive benchmarking, processing 78k+ ASes in under 0.8 seconds on
 just 2 CPU cores.
 
-> **Status:** the CUDA engine is in development. It builds and runs, but does not yet parse input
-> files or serialize a RIB, so it is not benchmarked against the CPU path. See
-> [CUDA engine status](#cuda-engine-status) below.
+The CUDA engine produces byte-identical output to the CPU engine on the test topology, verified by
+`test_cpu_gpu_output_parity` in the test suite. It is not yet benchmarked at scale — see
+[CUDA engine status](#cuda-engine-status) below.
 
 ---
 
@@ -22,8 +22,11 @@ state contiguous and cache-resident under load.
   arrays, not as per-AS objects, eliminating pointer chasing during propagation.
 - **Huge-page backed arena** — a custom aligned allocator requests 2 MB huge pages and falls back
   gracefully to standard aligned allocation when they are unavailable.
-- **CUDA engine (in development)** — `main.cu` implements GPU-side graph propagation. Host-side
-  file parsing and RIB writeback are not yet wired up.
+- **CUDA engine** — `main.cu` builds the same relationship-typed adjacency host-side, dispatches
+  rank-ordered propagation stages on the GPU, and serializes a RIB in the CPU engine's format.
+  Best-path selection is race-free: candidates contend via `atomicMin` on a packed 64-bit score,
+  then the single winner materializes its path. The sender index occupies the score's low bits, so
+  exactly one candidate can match and output is deterministic.
 - **PyBind11 bindings** — `main.cpp` compiles a second time as a Python extension module, exposing
   the engine as `bgp_simulator.run()` with no subprocess overhead.
 
@@ -93,9 +96,10 @@ Targets produced:
 
 ```bash
 ./bgp_simulator --relationships rel.txt --announcements ann.txt
+./bgp_sim_gpu   --relationships rel.txt --announcements ann.txt
 ```
 
-Results are written to `ribs.csv` as `asn,prefix,as_path`:
+Both engines accept the same flags and write `ribs.csv` in the same `asn,prefix,as_path` format:
 
 ```
 asn,prefix,as_path
@@ -104,7 +108,6 @@ asn,prefix,as_path
 3,192.168.1.0/24,"(3, 2, 1)"
 ```
 
-The GPU binary accepts the same flags but currently ignores them — see below.
 
 ### From Python
 
@@ -190,18 +193,18 @@ compare_output.sh         Diffs CPU and GPU output for parity checking
 
 ## CUDA Engine Status
 
-`main.cu` builds and executes GPU kernels, but the host side is incomplete:
+The GPU engine parses input, propagates on device, and emits a RIB matching the CPU engine's output
+exactly on the test topology. Known limitations:
 
-- Command-line arguments are accepted and discarded; `--relationships` and `--announcements` have
-  no effect on what the kernel processes.
-- No RIB is serialized, so `ribs.csv` is not produced by the GPU path.
-- Reported kernel times therefore do not scale with input size and are not comparable to CPU
-  timings.
+- **Dense RIB.** Device state is allocated as `num_ASes x num_prefixes` at roughly 78 bytes per
+  slot. The engine checks free VRAM at startup and refuses with a clear message rather than failing
+  mid-run, but CAIDA-scale input will not fit. A sparse per-node RIB is the next step.
+- **Not benchmarked.** Reported kernel times on small topologies are dominated by CUDA context
+  creation and should not be quoted as throughput figures.
+- **Host-side parsing is unoptimized.** `main.cu` uses `ifstream` rather than the CPU engine's
+  mmap fast path.
 
-Remaining work: parse the relationship and announcement files host-side, upload the topology to
-device memory, and write the resulting RIB back out in the same `asn,prefix,as_path` format the CPU
-engine emits. Once that lands, `test_cpu_gpu_output_parity` in `test_pipeline.py` will verify the
-two engines agree, and `compare_output.sh` can diff their output on a shared dataset.
+Use `compare_output.sh` to diff CPU and GPU output on any shared dataset.
 
 ## Notes on Benchmark Figures
 
