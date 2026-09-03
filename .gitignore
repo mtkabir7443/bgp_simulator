@@ -35,3 +35,4 @@ ann_py_test.txt
 
 # Massive benchmark data (>100MB) - prevents push failure
 bench/
+*.bak
