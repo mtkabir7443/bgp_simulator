@@ -1,7 +1,15 @@
+"""Draw the illustrative hijack topology; this is not engine output."""
+
+import argparse
+from pathlib import Path
+
 import networkx as nx
 import matplotlib.pyplot as plt
 
-def generate_and_visualize_hijack():
+DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "outputs" / "experiments" / "hijack_attack_graph.png"
+
+
+def generate_and_visualize_hijack(output_img=DEFAULT_OUTPUT):
     print("[+] Generating layered attack topology graph...")
     G = nx.DiGraph()
 
@@ -87,9 +95,15 @@ def generate_and_visualize_hijack():
     plt.ylim(-0.6, 3.6)
     plt.axis("off")
     
-    output_img = "hijack_attack_graph.png"
+    output_img = Path(output_img)
+    output_img.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_img, dpi=300, bbox_inches="tight")
+    plt.close()
     print(f"✅ Clean layered graph saved to: {output_img}")
 
 if __name__ == "__main__":
-    generate_and_visualize_hijack()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
+                        help="image path (default: repository outputs/experiments/hijack_attack_graph.png)")
+    args = parser.parse_args()
+    generate_and_visualize_hijack(args.output)

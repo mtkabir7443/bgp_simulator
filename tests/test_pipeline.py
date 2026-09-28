@@ -1,10 +1,12 @@
 import os
+from pathlib import Path
 import subprocess
 
 import pytest
 
-CPU_BINARY = os.path.abspath("./bgp_simulator")
-GPU_BINARY = os.path.abspath("./bgp_sim_gpu")
+BUILD = Path(__file__).resolve().parents[1] / "build"
+CPU_BINARY = BUILD / "bgp_simulator"
+GPU_BINARY = BUILD / "bgp_sim_gpu"
 
 # Minimal three-AS chain: 1 peers with 2, 2 is a provider to 3.
 # Exercises the provider stage, loop detection, and path construction.

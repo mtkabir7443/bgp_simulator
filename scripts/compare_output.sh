@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Compare BGP simulator output with expected results
-# Usage: ./compare_output.sh <expected_file> <actual_file>
+# Usage: scripts/compare_output.sh <expected_file> <actual_file>
 
 if [ $# -ne 2 ]; then
     echo "Usage: $0 <expected_file> <actual_file>"

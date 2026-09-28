@@ -2,8 +2,10 @@ import os
 import sys
 import time
 import random
+import tempfile
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
 import bgp_simulator
 
 def generate_hierarchical_topology(
@@ -110,7 +112,7 @@ def evaluate_simulation_results(attacker_as, rib_filename="ribs.csv"):
     print(f"      Attacker Contamination:     {poisoned_routes:,} routes selected attacker AS {attacker_as}")
     print(f"      Defense Cleanliness:         {((total_rib_entries - poisoned_routes) / total_rib_entries * 100):.2f}% clean")
 
-def run_experiment():
+def _run_experiment():
     rel_file = "rel_internet.txt"
     ann_file = "ann_internet.txt"
     rov_file = "rov_internet.txt"
@@ -139,13 +141,20 @@ def run_experiment():
 
     evaluate_simulation_results(attacker_as, rib_filename=rib_file)
 
-    for f in [rel_file, ann_file, rov_file, rib_file]:
-        if os.path.exists(f):
-            os.remove(f)
-
     print("\n================================================================")
     print("✅ Experiment completed successfully.")
     print("================================================================")
+
+def run_experiment():
+    """Keep generated inputs and the engine's ribs.csv out of the caller's folder."""
+    original_cwd = Path.cwd()
+    with tempfile.TemporaryDirectory(prefix="bgp_rov_") as directory:
+        os.chdir(directory)
+        try:
+            _run_experiment()
+        finally:
+            os.chdir(original_cwd)
+
 
 if __name__ == "__main__":
     run_experiment()

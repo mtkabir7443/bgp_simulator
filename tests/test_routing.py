@@ -7,13 +7,13 @@ import subprocess
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 PREFIX = "192.0.2.0/24"
 
 
 @pytest.fixture(params=["bgp_simulator", "bgp_sim_gpu"], ids=["cpu", "gpu"])
 def engine(request):
-    binary = ROOT / request.param
+    binary = ROOT / "build" / request.param
     if not binary.exists():
         pytest.skip(f"Build {request.param} to exercise this backend.")
     return binary

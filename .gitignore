@@ -1,40 +1,36 @@
-# Build artifacts
-bgp_simulator
-bgp_sim
-bgp_sim_gpu
-test_memory
+# Build products and local run output
+/build/
+/outputs/
 *.o
 *.so
 
-# Python
+# Local datasets; small test fixtures and the historical archive are tracked
+/data/generated/
+/data/bench/
+/data/archive/*.csv
+
+# Python environments and caches
 .venv/
 venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# Profiling
+# Profiling and editor files
 callgrind.out.*
 *.nsys-rep
 *.ncu-rep
-
-# OS / editor
 .DS_Store
 .vscode/
 *:Zone.Identifier
-
-# Generated outputs
-ribs.csv
-ribs_cpu.csv
-
-# Generated datasets
-rel.txt
-ann.txt
-rel_test.txt
-ann_test.txt
-rel_py_test.txt
-ann_py_test.txt
-
-# Massive benchmark data (>100MB) - prevents push failure
-bench/
 *.bak
+
+# Protect against artifacts from old commands run in the repository root
+/bgp_simulator
+/bgp_sim
+/bgp_sim_gpu
+/test_memory
+/rel*.txt
+/ann*.txt
+/ribs*.csv
+/bench/

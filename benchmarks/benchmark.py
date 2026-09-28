@@ -3,10 +3,15 @@
 import argparse
 import csv
 import os
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
+
+
+# The extension is built separately from the Python benchmark scripts.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
 
 
 @contextmanager
@@ -55,7 +60,7 @@ def run_speed_check(route_counts=(100_000, 500_000, 1_000_000)):
     if not route_counts or any(count < 1 or count > 2**24 for count in route_counts):
         raise ValueError("Route counts must be between 1 and 16,777,216")
 
-    # Resolve the extension while cwd still points to the caller's directory.
+    # Load the extension before entering the disposable working directory.
     import bgp_simulator
 
     print("Synthetic six-AS throughput benchmark")
