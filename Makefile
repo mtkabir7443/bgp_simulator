@@ -44,8 +44,7 @@ test: $(TEST_TARGET)
 
 # Full Python-side suite; depends on all three build products
 pytest: all
-	pytest test_pipeline.py -v
-	python3 test_python_binding.py
+	python3 -m pytest test_pipeline.py test_routing.py test_python_binding.py test_benchmarks.py -v
 
 clean:
 	rm -f $(CPU_TARGET) $(GPU_TARGET) $(TEST_TARGET) bgp_sim bgp_simulator*.so *.o ribs.csv

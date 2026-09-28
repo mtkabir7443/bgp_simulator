@@ -50,7 +50,7 @@ constexpr Relationship REL_PROVIDER = 3;
 constexpr uint64_t SCORE_NONE = 0xFFFFFFFFFFFFFFFFULL;
 
 // Lower score wins. Relationship dominates (customer < peer < provider),
-// then path length, then sender index as a deterministic tiebreak.
+// then path length, then sender ASN as a deterministic tiebreak.
 __host__ __device__ inline uint64_t pack_score(Relationship rel, uint32_t path_len, uint32_t sender) {
     return (static_cast<uint64_t>(rel) << 56) |
            (static_cast<uint64_t>(path_len) << 40) |
@@ -196,10 +196,13 @@ static bool load_announcements(const std::string& path,
     return true;
 }
 
-static void load_rov(const std::string& path, Topology& topo) {
-    if (path.empty()) return;
+static bool load_rov(const std::string& path, Topology& topo) {
+    if (path.empty()) return true;
     std::ifstream in(path);
-    if (!in) return;
+    if (!in) {
+        fprintf(stderr, "Could not open ROV file: %s\n", path.c_str());
+        return false;
+    }
 
     std::string line;
     while (std::getline(in, line)) {
@@ -208,12 +211,13 @@ static void load_rov(const std::string& path, Topology& topo) {
         auto it = topo.asn_to_idx.find(asn);
         if (it != topo.asn_to_idx.end()) topo.rov_enabled[it->second] = 1;
     }
+    return true;
 }
 
 // Kahn's algorithm over customer counts. Matches compute_ranks() in main.cpp.
-static std::vector<int> compute_ranks(const Topology& topo) {
+static bool compute_ranks(const Topology& topo, std::vector<int>& rank) {
     int n = topo.size();
-    std::vector<int> rank(n, 0);
+    rank.assign(n, 0);
     std::vector<int> remaining(n, 0);
     std::queue<int> q;
 
@@ -222,15 +226,21 @@ static std::vector<int> compute_ranks(const Topology& topo) {
         if (remaining[i] == 0) q.push(i);
     }
 
+    int processed = 0;
     while (!q.empty()) {
         int u = q.front();
         q.pop();
+        ++processed;
         for (int p : topo.providers[u]) {
             rank[p] = std::max(rank[p], rank[u] + 1);
             if (--remaining[p] == 0) q.push(p);
         }
     }
-    return rank;
+    if (processed != n) {
+        fprintf(stderr, "Topology contains a provider/customer cycle.\n");
+        return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +263,7 @@ __global__ void propagate_score_kernel(
     const int* __restrict__ adj_count,
     const int* __restrict__ adj,
     const uint8_t* __restrict__ rov_enabled,
+    const uint32_t* __restrict__ node_asns,
     Relationship rel_type,
     DeviceRib rib)
 {
@@ -268,7 +279,7 @@ __global__ void propagate_score_kernel(
     if (len == 0 || len >= MAX_PATH_LEN) return;
 
     uint8_t invalid = rib.rov_invalid[src];
-    uint64_t cand = pack_score(rel_type, len + 1, static_cast<uint32_t>(u));
+    uint64_t cand = pack_score(rel_type, len + 1, node_asns[u]);
 
     int start = adj_start[u];
     int count = adj_count[u];
@@ -290,7 +301,7 @@ __global__ void propagate_score_kernel(
 }
 
 // Phase 2: the single winning candidate materializes its path. Because the
-// sender index is packed into the low bits, exactly one candidate matches.
+// sender ASN is packed into the low bits, exactly one candidate matches.
 __global__ void propagate_commit_kernel(
     const int* __restrict__ stage_nodes, int num_stage_nodes,
     int num_prefixes,
@@ -298,6 +309,7 @@ __global__ void propagate_commit_kernel(
     const int* __restrict__ adj_count,
     const int* __restrict__ adj,
     const uint8_t* __restrict__ rov_enabled,
+    const uint32_t* __restrict__ node_asns,
     Relationship rel_type,
     DeviceRib rib)
 {
@@ -309,11 +321,15 @@ __global__ void propagate_commit_kernel(
     int p = tid % num_prefixes;
 
     size_t src = static_cast<size_t>(u) * num_prefixes + p;
+    // Scores are stable after phase 1. Newly learned peer routes cannot be
+    // exported to another peer; skip them before reading a concurrently
+    // materialized path. Origin/customer routes cannot change in this phase.
+    if (rel_type == REL_PEER && (rib.score[src] >> 56) > REL_CUSTOMER) return;
     uint8_t len = rib.path_len[src];
     if (len == 0 || len >= MAX_PATH_LEN) return;
 
     uint8_t invalid = rib.rov_invalid[src];
-    uint64_t cand = pack_score(rel_type, len + 1, static_cast<uint32_t>(u));
+    uint64_t cand = pack_score(rel_type, len + 1, node_asns[u]);
 
     int start = adj_start[u];
     int count = adj_count[u];
@@ -377,7 +393,10 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> prefix_strings;
     if (!load_announcements(args.ann_file, topo, anns, prefix_ids, prefix_strings)) return 1;
 
-    load_rov(args.rov_file, topo);
+    if (!load_rov(args.rov_file, topo)) return 1;
+
+    std::vector<int> rank;
+    if (!compute_ranks(topo, rank)) return 1;
 
     int N = topo.size();
     int P = static_cast<int>(prefix_strings.size());
@@ -409,7 +428,6 @@ int main(int argc, char* argv[]) {
     Csr cust = flatten(topo.customers);
     Csr peer = flatten(topo.peers);
 
-    std::vector<int> rank = compute_ranks(topo);
     int max_rank = 0;
     for (int r : rank) max_rank = std::max(max_rank, r);
 
@@ -441,8 +459,9 @@ int main(int argc, char* argv[]) {
         std::vector<uint32_t> h_nh(entries, 0);
 
         for (const auto& a : anns) {
+            if (topo.rov_enabled[a.origin_idx] && a.rov_invalid) continue;
             size_t e = static_cast<size_t>(a.origin_idx) * P + a.prefix_id;
-            h_score[e] = pack_score(REL_ORIGIN, 1, static_cast<uint32_t>(a.origin_idx));
+            h_score[e] = pack_score(REL_ORIGIN, 1, topo.idx_to_asn[a.origin_idx]);
             h_path[e * MAX_PATH_LEN] = static_cast<uint32_t>(a.origin_idx);
             h_len[e] = 1;
             h_inv[e] = a.rov_invalid;
@@ -459,6 +478,10 @@ int main(int argc, char* argv[]) {
     uint8_t* d_rov = nullptr;
     CUDA_CHECK(cudaMalloc(&d_rov, N * sizeof(uint8_t)));
     CUDA_CHECK(cudaMemcpy(d_rov, topo.rov_enabled.data(), N * sizeof(uint8_t), cudaMemcpyHostToDevice));
+
+    uint32_t* d_asns = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_asns, N * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemcpy(d_asns, topo.idx_to_asn.data(), N * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
     auto upload_csr = [](const Csr& c, int** d_start, int** d_count, int** d_adj, int n) {
         CUDA_CHECK(cudaMalloc(d_start, n * sizeof(int)));
@@ -495,12 +518,12 @@ int main(int argc, char* argv[]) {
 
         propagate_score_kernel<<<blocks, THREADS_PER_BLOCK>>>(
             d_stage, static_cast<int>(nodes.size()), P,
-            adj_start, adj_count, adj, d_rov, rel_type, rib);
+            adj_start, adj_count, adj, d_rov, d_asns, rel_type, rib);
         CUDA_CHECK(cudaGetLastError());
 
         propagate_commit_kernel<<<blocks, THREADS_PER_BLOCK>>>(
             d_stage, static_cast<int>(nodes.size()), P,
-            adj_start, adj_count, adj, d_rov, rel_type, rib);
+            adj_start, adj_count, adj, d_rov, d_asns, rel_type, rib);
         CUDA_CHECK(cudaGetLastError());
     };
 
@@ -557,7 +580,7 @@ int main(int argc, char* argv[]) {
 
     cudaFree(rib.score); cudaFree(rib.path); cudaFree(rib.path_len);
     cudaFree(rib.rov_invalid); cudaFree(rib.next_hop);
-    cudaFree(d_rov); cudaFree(d_stage);
+    cudaFree(d_rov); cudaFree(d_asns); cudaFree(d_stage);
     cudaFree(dp_start); cudaFree(dp_count); cudaFree(dp_adj);
     cudaFree(dc_start); cudaFree(dc_count); cudaFree(dc_adj);
     cudaFree(dr_start); cudaFree(dr_count); cudaFree(dr_adj);

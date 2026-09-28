@@ -51,5 +51,38 @@ def test_pybind11_execution():
     print("\nPyBind11 execution passed successfully.")
 
 
+def test_recovery_after_invalid_input():
+    """A rejected call must not poison the next simulation in the same process."""
+    original_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory(prefix="bgp_recovery_") as workdir:
+        os.chdir(workdir)
+        try:
+            with open("rel.txt", "w") as stream:
+                stream.write("1|2|-1\n2|1|-1\n")
+            with open("ann.txt", "w") as stream:
+                stream.write("1,192.0.2.0/24,0\n")
+            try:
+                bgp_simulator.run("rel.txt", "ann.txt")
+            except RuntimeError as error:
+                assert "cycl" in str(error).lower()
+            else:
+                raise AssertionError("Provider/customer cycle was accepted")
+            assert not os.path.exists("ribs.csv")
+
+            with open("rel.txt", "w") as stream:
+                stream.write("1|2|0\n")
+            for _ in range(2):
+                bgp_simulator.run("rel.txt", "ann.txt")
+                with open("ribs.csv") as stream:
+                    assert set(stream.read().splitlines()) == {
+                        "asn,prefix,as_path",
+                        '1,192.0.2.0/24,"(1,)"',
+                        '2,192.0.2.0/24,"(2, 1)"',
+                    }
+        finally:
+            os.chdir(original_cwd)
+
+
 if __name__ == "__main__":
     test_pybind11_execution()
+    test_recovery_after_invalid_input()

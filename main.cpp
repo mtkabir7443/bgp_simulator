@@ -3,7 +3,7 @@
  * - Fixed multi-run state reset bug (pool_running flag lifecycle)
  * - Sharded concurrent prefix hash table with a contiguous string arena
  * - Sparse ASN hash map supporting arbitrary 32-bit ASNs
- * - Resilient cycle-breaking rank calculation for real-world BGP topologies
+ * - Validated rank calculation for acyclic provider/customer topologies
  * - Multi-hop AS-path tracking up to 16 hops
  * - Pre-sized allocation buffers to eliminate dynamic memory growth latency
  */
@@ -27,6 +27,8 @@
 #include <random>
 #include <unordered_map>
 #include <mutex>
+#include <cerrno>
+#include <stdexcept>
 
 #ifdef BUILD_PYTHON_MODULE
 #include <pybind11/pybind11.h>
@@ -279,22 +281,22 @@ struct CopyConfig {
 // -----------------------------------------------------------------------------
 // Helpers & Fast Hash
 // -----------------------------------------------------------------------------
-inline uint32_t fast_atoi(char*& p) {
+inline uint32_t fast_atoi(char*& p, const char* end) {
     uint32_t x = 0;
-    while (*p >= '0' && *p <= '9') {
+    while (p < end && *p >= '0' && *p <= '9') {
         x = (x * 10) + (*p - '0');
         p++;
     }
     return x;
 }
 
-inline void skip_until_num(char*& p) {
-    while (*p && (*p < '0' || *p > '9')) p++;
+inline void skip_until_num(char*& p, const char* end) {
+    while (p < end && *p && (*p < '0' || *p > '9')) p++;
 }
 
-inline void skip_line(char*& p) {
-    while (*p && *p != '\n') p++;
-    if (*p) p++;
+inline void skip_line(char*& p, const char* end) {
+    while (p < end && *p && *p != '\n') p++;
+    if (p < end && *p) p++;
 }
 
 inline uint64_t hash_string(const char* str, size_t len) {
@@ -349,22 +351,28 @@ struct MappedFile {
 MappedFile map_file_read(const std::string& filename) {
     MappedFile mf;
     int fd = open(filename.c_str(), O_RDONLY);
-    if (fd == -1) return mf;
+    if (fd == -1) {
+        throw std::runtime_error("Cannot open input file '" + filename + "': " + std::strerror(errno));
+    }
 
     struct stat sb;
-    if (fstat(fd, &sb) == -1 || sb.st_size == 0) {
+    if (fstat(fd, &sb) == -1) {
+        int error = errno;
+        close(fd);
+        throw std::runtime_error("Cannot inspect input file '" + filename + "': " + std::strerror(error));
+    }
+    if (sb.st_size == 0) {
         close(fd);
         return mf;
     }
 
     mf.size = sb.st_size;
     mf.buf = static_cast<char*>(mmap(nullptr, mf.size, PROT_READ, MAP_PRIVATE, fd, 0));
+    int map_error = errno;
     close(fd);
 
     if (mf.buf == MAP_FAILED) {
-        mf.buf = nullptr;
-        mf.size = 0;
-        return mf;
+        throw std::runtime_error("Cannot map input file '" + filename + "': " + std::strerror(map_error));
     }
     madvise(mf.buf, mf.size, MADV_SEQUENTIAL);
     return mf;
@@ -460,7 +468,7 @@ void process_queue(int idx) {
             uint32_t curr_actual = sort_idxs[sorted_idx];
             if (queue[curr_actual].prefix_id != curr_pid) break;
             const auto& ann = queue[curr_actual];
-            if (!node.rov_enabled || !ann.rov_invalid) {
+            if (ann.path_len < MAX_PATH_LEN && (!node.rov_enabled || !ann.rov_invalid)) {
                 if (best_new == nullptr || ann.get_score() < best_new->get_score()) {
                     best_new = &ann;
                 }
@@ -476,19 +484,14 @@ void process_queue(int idx) {
         bool has_existing = (rib_idx < rib_size && node.rib[rib_idx].prefix_id == curr_pid);
 
         if (best_new) {
-            if (has_existing && best_new->get_score() >= node.rib[rib_idx].get_score()) {
+            Announcement candidate = *best_new;
+            for (int z = candidate.path_len; z > 0; --z) candidate.path[z] = candidate.path[z - 1];
+            candidate.path[0] = node.asn;
+            candidate.path_len++;
+            if (has_existing && candidate.get_score() >= node.rib[rib_idx].get_score()) {
                 node.next_rib.push_back(node.rib[rib_idx]);
             } else {
-                node.next_rib.emplace_back(*best_new);
-                Announcement& stored = node.next_rib.back();
-                if (stored.path_len < MAX_PATH_LEN) {
-                    for (int z = stored.path_len; z > 0; --z) stored.path[z] = stored.path[z - 1];
-                    stored.path[0] = node.asn;
-                    stored.path_len++;
-                } else {
-                    node.next_rib.pop_back();
-                    if (has_existing) node.next_rib.push_back(node.rib[rib_idx]);
-                }
+                node.next_rib.emplace_back(candidate);
             }
             if (has_existing) rib_idx++;
         } else if (has_existing) {
@@ -722,22 +725,27 @@ void load_topology(const std::string& filename) {
     if (!mf.buf) return;
 
     char* p = mf.buf;
+    char* end = mf.buf + mf.size;
     as_graph.reserve(80000);
     edge_pool.reserve(1000000);
     head_p.resize(80000, -1);
     head_c.resize(80000, -1);
     head_r.resize(80000, -1);
 
-    while (p < mf.buf + mf.size && *p) {
-        if (*p == '#') { skip_line(p); continue; }
+    while (p < end && *p) {
+        if (*p == '#') { skip_line(p, end); continue; }
         if (*p < '0' || *p > '9') { p++; continue; }
-        uint32_t asn1 = fast_atoi(p); skip_until_num(p); uint32_t asn2 = fast_atoi(p);
-        while (*p && *p != '|' && *p != '\n') p++;
-        if (*p == '|') p++;
+        uint32_t asn1 = fast_atoi(p, end); skip_until_num(p, end); uint32_t asn2 = fast_atoi(p, end);
+        while (p < end && *p && *p != '|' && *p != '\n') p++;
+        if (p < end && *p == '|') p++;
+        if (p == end) break;
         int rel = 0;
-        if (*p == '-') { rel = -1; p += 2; }
+        if (*p == '-') {
+            if (end - p < 2) break;
+            rel = -1; p += 2;
+        }
         else { rel = *p - '0'; p++; }
-        skip_line(p);
+        skip_line(p, end);
 
         int idx1 = get_as_index(asn1);
         int idx2 = get_as_index(asn2);
@@ -788,17 +796,18 @@ void load_topology(const std::string& filename) {
 void parse_announcements_chunk(char* start, char* end, int t_id) {
     char* p = start;
     while (p < end && *p) {
-        if (*p < '0' || *p > '9') { skip_line(p); continue; }
-        uint32_t asn = fast_atoi(p); skip_until_num(p);
+        if (*p < '0' || *p > '9') { skip_line(p, end); continue; }
+        uint32_t asn = fast_atoi(p, end); skip_until_num(p, end);
+        if (p == end) break;
         char* prefix_start = p;
-        while (*p && *p != ',' && *p != '\n') { p++; }
+        while (p < end && *p && *p != ',' && *p != '\n') { p++; }
         size_t prefix_len = p - prefix_start;
         bool rov = false;
-        if (*p == ',') {
+        if (p < end && *p == ',') {
             p++;
-            if (*p == 'T' || *p == 't' || *p == '1') rov = true;
+            if (p < end && (*p == 'T' || *p == 't' || *p == '1')) rov = true;
         }
-        skip_line(p);
+        skip_line(p, end);
 
         auto it = asn_to_idx.find(asn);
         if (it == asn_to_idx.end()) continue;
@@ -834,11 +843,11 @@ void load_announcements(const std::string& filename) {
 
         if (i > 0) {
             while (chunk_start < mf.buf + mf.size && *chunk_start != '\n') chunk_start++;
-            if (*chunk_start == '\n') chunk_start++;
+            if (chunk_start < mf.buf + mf.size && *chunk_start == '\n') chunk_start++;
         }
         if (i < g_num_threads - 1) {
             while (chunk_end < mf.buf + mf.size && *chunk_end != '\n') chunk_end++;
-            if (*chunk_end == '\n') chunk_end++;
+            if (chunk_end < mf.buf + mf.size && *chunk_end == '\n') chunk_end++;
         }
 
         parser_threads.emplace_back(parse_announcements_chunk, chunk_start, chunk_end, i);
@@ -858,9 +867,10 @@ void load_rov(const std::string& filename) {
     if (!mf.buf) return;
 
     char* p = mf.buf;
-    while (p < mf.buf + mf.size && *p) {
+    char* end = mf.buf + mf.size;
+    while (p < end && *p) {
         if (*p < '0' || *p > '9') { p++; continue; }
-        uint32_t asn = fast_atoi(p); skip_line(p);
+        uint32_t asn = fast_atoi(p, end); skip_line(p, end);
         auto it = asn_to_idx.find(asn);
         if (it != asn_to_idx.end()) {
             as_graph[it->second].rov_enabled = true;
@@ -897,23 +907,7 @@ void compute_ranks() {
     }
 
     if (processed_nodes < as_graph.size()) {
-        for (size_t i = 0; i < as_graph.size(); ++i) {
-            if (remaining_customers[i] > 0) {
-                if (as_graph[i].rank == -1) as_graph[i].rank = 0;
-                q.push(static_cast<int>(i));
-            }
-        }
-        while (!q.empty()) {
-            int u = q.front(); q.pop();
-            uint32_t start = as_graph[u].prov_start;
-            uint32_t end = start + as_graph[u].prov_count;
-            for (uint32_t k = start; k < end; ++k) {
-                int v = global_providers[k];
-                if (as_graph[v].rank < as_graph[u].rank + 1) {
-                    as_graph[v].rank = as_graph[u].rank + 1;
-                }
-            }
-        }
+        throw std::runtime_error("Provider/customer cycle detected; rank-ordered propagation requires an acyclic provider/customer topology.");
     }
 }
 
@@ -950,19 +944,26 @@ Args parse_args(int argc, char* argv[]) {
 
 #ifndef BUILD_PYTHON_MODULE
 int main(int argc, char* argv[]) {
-    Args args = parse_args(argc, argv);
-    if (args.rel_file.empty()) return 1;
+    try {
+        Args args = parse_args(argc, argv);
+        if (args.rel_file.empty() || args.ann_file.empty()) {
+            throw std::runtime_error("Both --relationships and --announcements input files are required.");
+        }
 
-    unsigned int hw = std::thread::hardware_concurrency();
-    g_num_threads = hw > 0 ? static_cast<int>(hw) : 4;
+        unsigned int hw = std::thread::hardware_concurrency();
+        g_num_threads = hw > 0 ? static_cast<int>(hw) : 4;
 
-    load_topology(args.rel_file);
-    compute_ranks();
-    load_rov(args.rov_file);
-    load_announcements(args.ann_file);
-    run_simulation_and_write();
+        load_topology(args.rel_file);
+        compute_ranks();
+        load_rov(args.rov_file);
+        load_announcements(args.ann_file);
+        run_simulation_and_write();
 
-    return 0;
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "BGP simulation failed: " << error.what() << '\n';
+        return 1;
+    }
 }
 #else
 void run_bgp_simulation(std::string rel_file, std::string ann_file, std::string rov_file) {

@@ -1,213 +1,207 @@
-# High-Performance BGP Simulator (Singularity Edition)
+# BGP Simulator
 
-A heterogeneous CPU/GPU implementation of a Border Gateway Protocol (BGP) simulator for modeling
-Internet routing behavior at global scale. Built in C++17 and CUDA, with a PyBind11 extension for
-driving the C++ engine directly from Python.
+A C++17 CPU engine and experimental CUDA engine for studying static inter-AS route
+selection, commercial routing policy, and simplified Route Origin Validation
+(ROV). A PyBind11 module exposes the CPU engine to Python.
 
-The CPU engine placed 1st in competitive benchmarking, processing 78k+ ASes in under 0.8 seconds on
-just 2 CPU cores.
+The project emphasizes explicit model assumptions, expected-route tests, and
+reproducible measurements. It does not implement the complete BGP protocol or
+simulate sessions, update timers, withdrawals, or convergence over time. See
+[RFC 4271](https://www.rfc-editor.org/rfc/rfc4271.html) for the protocol and
+[RFC 6811](https://www.rfc-editor.org/rfc/rfc6811.html) for origin validation.
 
-The CUDA engine produces byte-identical output to the CPU engine on the test topology, verified by
-`test_cpu_gpu_output_parity` in the test suite. It is not yet benchmarked at scale — see
-[CUDA engine status](#cuda-engine-status) below.
+## Routing model
 
----
+- Routes travel upward to providers, across at most one peer link, then downward
+  to customers. The provider/customer hierarchy must be acyclic; both engines
+  reject cycles. Peer links may form cycles.
+- Selection prefers local origin, then customer, peer, and provider routes.
+  Ties use shorter AS paths, then the lower next-hop ASN.
+- Paths include the observing AS and are limited to 16 ASNs. Routes exceeding
+  that limit are omitted; this is a model limit, not a BGP protocol limit.
+- ROV uses a supplied invalid flag and a set of filtering ASes. Invalid routes
+  are rejected at those ASes, including locally seeded announcements. This is an
+  experimental filtering rule; the engine does not validate ROAs or implement
+  the full Valid/Invalid/NotFound state model.
+- Prefixes are matched by input strings. Supply canonical IPv4 CIDRs and origins
+  present in the relationship file; unknown origins are currently ignored.
+  Conflicting duplicate announcements are not a supported contract.
 
-## Architecture
+## Build
 
-The simulator is built around a data-oriented design rather than an object graph, which keeps route
-state contiguous and cache-resident under load.
-
-- **Struct-of-Arrays route state** — AS relationships and announcements are stored as parallel
-  arrays, not as per-AS objects, eliminating pointer chasing during propagation.
-- **Huge-page backed arena** — a custom aligned allocator requests 2 MB huge pages and falls back
-  gracefully to standard aligned allocation when they are unavailable.
-- **CUDA engine** — `main.cu` builds the same relationship-typed adjacency host-side, dispatches
-  rank-ordered propagation stages on the GPU, and serializes a RIB in the CPU engine's format.
-  Best-path selection is race-free: candidates contend via `atomicMin` on a packed 64-bit score,
-  then the single winner materializes its path. The sender index occupies the score's low bits, so
-  exactly one candidate can match and output is deterministic.
-- **PyBind11 bindings** — `main.cpp` compiles a second time as a Python extension module, exposing
-  the engine as `bgp_simulator.run()` with no subprocess overhead.
-
----
-
-## Requirements
-
-| Component | Requirement |
-|---|---|
-| Compiler | g++ with C++17 support |
-| CUDA | NVIDIA CUDA Toolkit, compute capability 8.6 or newer |
-| Python | 3.8+ with `pybind11` installed |
-| Testing | GoogleTest (`libgtest-dev`), `pytest` |
-
-Install the Python-side build dependency:
+Linux or WSL2, g++ with C++17, and Make are required for the CPU engine. CUDA
+requires an NVIDIA GPU and compatible toolkit/driver. Bindings require Python
+development headers and `pybind11`; Python tests require `pytest`.
 
 ```bash
-pip install pybind11
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install pybind11 pytest
+make                     # CPU binary, GPU binary, and Python extension
 ```
 
-If your GPU is not Ampere-class, adjust `NVCCFLAGS` in the `Makefile`:
+Run these commands from the repository directory. Activate the environment with
+`source .venv/bin/activate` in each new terminal before building the Python
+extension or running Python tests. If Ubuntu reports that `venv` is unavailable,
+install `python3-venv` with `sudo apt install python3-venv`, then retry creation.
 
-```make
-NVCCFLAGS = -O3 -std=c++17 -arch=sm_89   # Ada (RTX 40-series)
-```
-
----
-
-## Huge Pages
-
-The allocator is designed around 2 MB huge pages. Without them it still runs correctly, but falls
-back to standard pages and loses a meaningful amount of throughput on large topologies. Reserve
-them before a benchmark run:
+To build an individual component instead of all three:
 
 ```bash
-sudo sysctl -w vm.nr_hugepages=1024
+make cpu                 # bgp_simulator
+make gpu                 # bgp_sim_gpu
+make python              # bgp_simulator*.so
 ```
 
-That reserves 2 GB. To make it persist across reboots, add `vm.nr_hugepages = 1024` to
-`/etc/sysctl.conf`.
+The default GPU architecture is `sm_86`. To select another architecture supported
+by your GPU and CUDA toolkit, use an override when building, for example
+`make gpu GPU_ARCH=sm_89`. If the GPU binary already exists, force recompilation
+with `make -B gpu GPU_ARCH=sm_89`; Make does not track changes to this variable.
 
----
+Production code does not request huge pages. Reserving system huge pages is not
+required to run either engine.
 
-## Building
-
-```bash
-make            # builds CPU binary, GPU binary, and Python extension
-make bgp_simulator   # CPU only
-make bgp_sim_gpu     # GPU only
-make clean
-```
-
-Targets produced:
-
-| Target | Output |
-|---|---|
-| `bgp_simulator` | CPU engine |
-| `bgp_sim_gpu` | CUDA engine |
-| `bgp_simulator*.so` | PyBind11 extension module |
-| `test_memory` | GoogleTest allocator suite |
-
----
-
-## Usage
-
-### Command line
+## Run
 
 ```bash
 ./bgp_simulator --relationships rel.txt --announcements ann.txt
-./bgp_sim_gpu   --relationships rel.txt --announcements ann.txt
+./bgp_sim_gpu --relationships rel.txt --announcements ann.txt
 ```
 
-Both engines accept the same flags and write `ribs.csv` in the same `asn,prefix,as_path` format:
+Those commands use your current datasets, which may exceed GPU memory. For a
+small GPU example using the included disconnected-topology fixture:
 
-```
-asn,prefix,as_path
-1,192.168.1.0/24,"(1,)"
-2,192.168.1.0/24,"(2, 1)"
-3,192.168.1.0/24,"(3, 2, 1)"
+```bash
+./bgp_sim_gpu --relationships rel_island.txt --announcements ann_island.txt
 ```
 
+This fixture produces two routes, at AS1 and AS2. AS3 and AS4 are disconnected
+from the origin and receive no route. `make pytest` runs its GPU fixtures in
+temporary directories if you want a check that preserves existing output.
 
-### From Python
+Both engines write `ribs.csv` in the current directory. Use a separate working
+directory for each run if previous output matters. Missing requested files and
+provider/customer cycles fail with diagnostics and nonzero CLI exit status;
+Python calls raise an exception. Readable empty input is allowed.
 
-```python
-import bgp_simulator
+Relationship rows use `provider|customer|-1` or `peer|peer|0`:
 
-bgp_simulator.run(
-    relationships="rel.txt",
-    announcements="ann.txt",
-    rov_asns="",
-)
-```
-
-### Input format
-
-`rel.txt` — one AS relationship per line, pipe-delimited, where `0` denotes a peer-to-peer link and
-`-1` denotes provider-to-customer:
-
-```
+```text
 1|2|0
 2|3|-1
 ```
 
-`ann.txt` — one announcement per line as `origin_asn,prefix,timestamp`:
+Announcement rows use `origin_asn,prefix[,rov_invalid]`. The optional third field
+is a boolean flag, not a timestamp. Use `0` for valid and `1` for invalid:
 
+```text
+1,192.0.2.0/24,0
 ```
-1,192.168.1.0/24,0
+
+To enable ROV filtering, create a file containing one filtering ASN per line and
+add `--rov-asns <path-to-file>` to either command. Omit this option when no ROV
+file is available. The example above produces:
+
+```csv
+asn,prefix,as_path
+1,192.0.2.0/24,"(1,)"
+2,192.0.2.0/24,"(2, 1)"
+3,192.0.2.0/24,"(3, 2, 1)"
 ```
 
----
+Row order is not part of the interface. Tests compare route contents, not bytes.
+The Python API uses the same files and output:
 
-## Generating Test Data
+```python
+import bgp_simulator
+bgp_simulator.run(relationships="rel.txt", announcements="ann.txt", rov_asns="")
+```
+
+Calls are sequential and reset route state between runs. The binding uses global
+engine state and writes to the process's current directory.
+
+## Test
 
 ```bash
-python3 generate_data.py         # large synthetic topology tuned for ~14 GB route state
-python3 generate_edge_cases.py   # infinite-loop and disconnected-island topologies
+make pytest   # build CPU, GPU, binding; run the Python suites
+make test     # legacy GoogleTest memory experiments (requires libgtest-dev)
 ```
 
-`generate_edge_cases.py` produces `ann_island.txt` / `rel_island.txt` and the loop topology used to
-verify that path-vector loop detection terminates correctly on adversarial input.
+`test_routing.py` specifies expected routes for policy preference, path length,
+ASN ties and reordered input, peer export restrictions, disconnected components,
+ROV, and 32-bit ASNs. It also tests the 16-ASN boundary, rejected cycles, missing
+files, and page-boundary input without a final newline. `test_pipeline.py`
+retains the original small CPU/GPU parity checks. `test_python_binding.py`
+checks execution and recovery after rejection. `test_benchmarks.py` checks
+workload generation, actual route counts, and preservation of existing files.
 
----
+The GoogleTest file contains a separate allocator/RIB experiment. Passing it
+does not establish production allocator safety. GPU tests require a working
+CUDA device; the routing suite skips a backend if its binary is absent.
 
-## Testing
+## Measure
+
+Start with small, isolated runs:
 
 ```bash
-make test                    # GoogleTest allocator suite
-pytest test_pipeline.py -v   # end-to-end CPU and GPU pipeline
-python3 test_python_binding.py
-python3 stress_test.py       # 500k-route soak test
+python3 benchmark.py --routes 10 100
+python3 caida_benchmark.py --tier1 2 --tier2 4 --stubs 20 --prefixes 8
 ```
 
-The allocator suite covers huge-page fallback and free, aligned allocation at standard sizes, and
-dynamic growth of the struct-of-arrays backing store.
+Both scripts use temporary working directories and count actual output RIB rows.
+Engine elapsed time includes parsing, route selection, and CSV serialization;
+dataset generation and output counting are outside that timer. These are
+single-run CPU measurements, not convergence times or established GPU speedups.
+Record hardware, revision, workload, repeated samples, and peak memory before
+making performance claims.
 
----
+Despite its historical filename, `caida_benchmark.py` generates a **synthetic
+tiered graph**, not a measured CAIDA dataset. Earlier 78k-AS/0.8-second and
+competitive-ranking claims lack a reproducible result bundle here and are not
+current performance guarantees. Its corrected default really generates 500
+unique prefixes; the earlier generator produced only two, a much lighter load.
 
-## Benchmarking & Analysis
+## Architecture and limits
 
-| Script | Purpose |
-|---|---|
-| `benchmark.py` | General throughput harness |
-| `caida_benchmark.py` | Benchmarks against real CAIDA AS-relationship datasets |
-| `lpm_churn_sim.py` | Longest-prefix-match behavior under route churn |
-| `simulate_internet_rov.py` | Route Origin Validation deployment simulation |
-| `visualize_hijack.py` | Renders prefix-hijack propagation graphs |
+### Archived output
 
-![Hijack propagation](hijack_attack_graph.png)
+`ribs_cpu.csv.gz` preserves an existing CPU output snapshot as a lossless gzip
+archive. It predates this correctness pass and is not a validated benchmark or
+expected-results fixture. To restore it when the local CSV is absent, run
+`gzip -dk ribs_cpu.csv.gz`. The uncompressed `ribs_cpu.csv` is ignored by Git;
+the archive preserves the data without committing an oversized individual file.
 
----
+### Engine storage
 
-## Repository Layout
+The CPU uses flattened relationship arrays, per-AS vectors of route records,
+parallel announcement parsing, staged worker dispatch, and mmap input/output.
+Its aligned route record occupies 128 bytes. The GPU uses relationship-typed
+adjacency and dense route arrays, with atomic score selection followed by path
+materialization. Scores use raw ASNs for consistent tie-breaking.
 
-```
-main.cpp                  CPU engine + PyBind11 module
-main.cu                   CUDA engine
-test_memory.cpp           GoogleTest allocator suite
-Makefile                  CPU / GPU / Python build targets
-compare_output.sh         Diffs CPU and GPU output for parity checking
-```
+GPU RIB storage alone costs `AS_count * unique_prefix_count * 78` bytes, plus
+graph, staging, and host memory. A free-VRAM check rejects RIBs exceeding device
+memory; it is not a complete resource guarantee. GPU stage timing excludes host
+parsing and final CSV output. Large GPU workloads are not yet validated.
 
----
+Remaining work includes strict shared input validation, defined duplicate
+handling, dynamic collision-safe prefix storage, checked allocation/output
+errors, and wider differential testing. The CPU preallocates large buffers per
+hardware thread; measure these costs before tuning concurrency.
 
-## CUDA Engine Status
+`lpm_churn_sim.py`, `simulate_internet_rov.py`, and `visualize_hijack.py` are
+exploratory demonstrations, not validated research pipelines. Known issues
+include the LPM helper's /32 lookup, ROV prefix generation and outcome counting,
+and an illustrative graph not derived from engine output. `stress_test.py` and
+the data generators write into their current directory; run them in scratch space.
 
-The GPU engine parses input, propagates on device, and emits a RIB matching the CPU engine's output
-exactly on the test topology. Known limitations:
+## Development order
 
-- **Dense RIB.** Device state is allocated as `num_ASes x num_prefixes` at roughly 78 bytes per
-  slot. The engine checks free VRAM at startup and refuses with a clear message rather than failing
-  mid-run, but CAIDA-scale input will not fit. A sparse per-node RIB is the next step.
-- **Not benchmarked.** Reported kernel times on small topologies are dominated by CUDA context
-  creation and should not be quoted as throughput figures.
-- **Host-side parsing is unoptimized.** `main.cu` uses `ifstream` rather than the CPU engine's
-  mmap fast path.
-
-Use `compare_output.sh` to diff CPU and GPU output on any shared dataset.
-
-## Notes on Benchmark Figures
-
-The 78k-AS / 0.8-second figure is measured on CAIDA topology data on 2 CPU cores with huge pages
-reserved. Timings vary meaningfully with huge-page availability, so reserve them before comparing
-runs.
+1. Expand correctness tests with an independent small-graph oracle; finish input
+   validation and resource error handling.
+2. Establish reproducible CPU measurements with actual counts, repeated runs,
+   dataset identity, and peak memory.
+3. Measure GPU memory/runtime across node and prefix counts. Compare bounded
+   prefix batching against sparse RIB storage before choosing a redesign.
+4. Validate one ROV/hijack experiment with canonical prefixes, fixed seeds, exact
+   origin classification, and visualization of actual output.
